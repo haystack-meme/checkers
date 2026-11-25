@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Checkers</title>
+<style>
+  :root { --bg:#1d1f24; --fg:#eee; --light:#e8d3a9; --dark:#7a4e2d; --hl:#f5d742; --move:#5fd35f; }
+  * { box-sizing: border-box; }
+  body { margin:0; min-height:100vh; background:var(--bg); color:var(--fg);
+         font-family:system-ui, sans-serif; display:flex; flex-direction:column; align-items:center; padding:16px; }
+  h1 { margin:8px 0 4px; font-size:1.6rem; }
+  #status { margin:6px 0 12px; min-height:1.4em; }
+  #board { display:grid; grid-template-columns:repeat(8,1fr); width:min(92vw,560px); aspect-ratio:1;
+           border:6px solid #3b2615; border-radius:6px; user-select:none; }
+  .sq { position:relative; display:flex; align-items:center; justify-content:center; }
+  .sq.l { background:var(--light); } .sq.d { background:var(--dark); cursor:pointer; }
+  .sq.target::after { content:""; width:30%; height:30%; border-radius:50%; background:var(--move); opacity:.8; }
+  .pc { width:78%; height:78%; border-radius:50%; display:flex; align-items:center; justify-content:center;
+        font-size:min(5vw,30px); box-shadow:inset 0 -4px 0 rgba(0,0,0,.35), 0 2px 4px rgba(0,0,0,.5); }
+  .pc.r { background:#c62828; color:#ffd54f; } .pc.b { background:#222; color:#ffd54f; border:2px solid #555; }
+  .pc.sel { outline:4px solid var(--hl); }
+  .pc.can { outline:2px dashed var(--hl); }
+  .controls { margin-top:14px; display:flex; gap:10px; flex-wrap:wrap; justify-content:center; }
+  button, select { font:inherit; padding:8px 14px; border-radius:6px; border:1px solid #555; background:#2c2f36; color:var(--fg); cursor:pointer; }
+  p.help { max-width:560px; opacity:.7; font-size:.9rem; text-align:center; }
+</style>
+</head>
+<body>
+<h1>Checkers</h1>
+<div id="status"></div>
+<div id="board"></div>
+<div class="controls">
+  <select id="mode">
+    <option value="ai">You vs computer</option>
+    <option value="2p">2 players</option>
+  </select>
+  <select id="level">
+    <option value="2">Easy</option>
+    <option value="4" selected>Medium</option>
+    <option value="6">Hard</option>
+  </select>
+  <button id="new">New game</button>
+  <button id="undo">Undo</button>
+</div>
+<p class="help">Red moves first. Captures are mandatory and multi-jumps must be finished. Reach the far row to crown a king (♛), which moves both ways.</p>
+<script>
+// board[r][c]: null or {c:'r'|'b', k:bool}. Red starts at the bottom and moves up.
+let board, turn, sel, chain, history, over;
+const $ = id => document.getElementById(id);
+const dirs = p => p.k ? [[-1,-1],[-1,1],[1,-1],[1,1]] : p.c === 'r' ? [[-1,-1],[-1,1]] : [[1,-1],[1,1]];
+const inB = (r,c) => r>=0 && r<8 && c>=0 && c<8;
+const clone = b => b.map(row => row.map(p => p && {...p}));
+
+function newGame() {
+  board = Array.from({length:8}, (_,r) => Array.from({length:8}, (_,c) =>
+    (r+c)%2 && r<3 ? {c:'b',k:false} : (r+c)%2 && r>4 ? {c:'r',k:false} : null));
+  turn = 'r'; sel = null; chain = null; history = []; over = false;
+  render();
+}
+
+// Moves for one piece: {fr,fc,tr,tc,cap:[r,c]|null}
+function pieceMoves(b, r, c, jumpsOnly) {
+  const p = b[r][c], out = [];
+  for (const [dr,dc] of dirs(p)) {
+    const r1=r+dr, c1=c+dc, r2=r+2*dr, c2=c+2*dc;
+    if (inB(r2,c2) && b[r1][c1] && b[r1][c1].c !== p.c && !b[r2][c2])
+      out.push({fr:r,fc:c,tr:r2,tc:c2,cap:[r1,c1]});
+    else if (!jumpsOnly && inB(r1,c1) && !b[r1][c1])
+      out.push({fr:r,fc:c,tr:r1,tc:c1,cap:null});
+  }
+  return jumpsOnly ? out : out;
+}
+
+function allMoves(b, color) {
+  let all = [];
+  for (let r=0;r<8;r++) for (let c=0;c<8;c++) if (b[r][c]?.c === color) all.push(...pieceMoves(b,r,c,false));
+  const jumps = all.filter(m => m.cap);
+  return jumps.length ? jumps : all;
+}
+
+// Applies one step; returns true if the turn continues (more jumps available).
+function apply(b, m) {
+  const p = b[m.fr][m.fc];
+  b[m.tr][m.tc] = p; b[m.fr][m.fc] = null;
+  let crowned = false;
+  if (m.cap) b[m.cap[0]][m.cap[1]] = null;
+  if (!p.k && ((p.c==='r' && m.tr===0) || (p.c==='b' && m.tr===7))) { p.k = true; crowned = true; }
+  return !!m.cap && !crowned && pieceMoves(b, m.tr, m.tc, true).length > 0;
+}
+
+function legalNow() {
+  return chain ? pieceMoves(board, chain[0], chain[1], true) : allMoves(board, turn);
+}
+
+function doMove(m) {
+  history.push({board: clone(board), turn, chain});
+  const more = apply(board, m);
+  if (more) { chain = [m.tr, m.tc]; sel = chain; }
+  else { chain = null; sel = null; turn = turn === 'r' ? 'b' : 'r'; }
+  render();
+  if (!over && $('mode').value === 'ai' && turn === 'b') setTimeout(aiTurn, 350);
+}
+
+// ---------- AI: minimax with alpha-beta over full turns (multi-jumps expanded) ----------
+function turnSequences(b, color) {
+  const res = [];
+  const walk = (bb, moves, steps) => {
+    for (const m of moves) {
+      const nb = clone(bb), more = apply(nb, m);
+      if (more) walk(nb, pieceMoves(nb, m.tr, m.tc, true), [...steps, m]);
+      else res.push({board: nb, steps: [...steps, m]});
+    }
+  };
+  walk(b, allMoves(b, color), []);
+  return res;
+}
+function evaluate(b) {
+  let s = 0;
+  for (let r=0;r<8;r++) for (let c=0;c<8;c++) {
+    const p = b[r][c]; if (!p) continue;
+    let v = p.k ? 3 : 1 + (p.c==='b' ? r : 7-r) * 0.05;
+    if (c>1 && c<6 && r>1 && r<6) v += 0.05;
+    s += p.c === 'b' ? v : -v;
+  }
+  return s;
+}
+function minimax(b, depth, color, a, z) {
+  const seqs = turnSequences(b, color);
+  if (!seqs.length) return color === 'b' ? -1000 - depth : 1000 + depth;
+  if (depth === 0) return evaluate(b);
+  if (color === 'b') {
+    let best = -Infinity;
+    for (const s of seqs) { best = Math.max(best, minimax(s.board, depth-1, 'r', a, z)); a = Math.max(a,best); if (a>=z) break; }
+    return best;
+  } else {
+    let best = Infinity;
+    for (const s of seqs) { best = Math.min(best, minimax(s.board, depth-1, 'b', a, z)); z = Math.min(z,best); if (a>=z) break; }
+    return best;
+  }
+}
+function aiTurn() {
+  const depth = +$('level').value;
+  const seqs = turnSequences(board, 'b');
+  if (!seqs.length) return;
+  let best = -Infinity, picks = [];
+  for (const s of seqs) {
+    const v = minimax(s.board, depth-1, 'r', -Infinity, Infinity);
+    if (v > best + 1e-9) { best = v; picks = [s]; } else if (Math.abs(v-best) < 1e-9) picks.push(s);
+  }
+  const steps = picks[Math.floor(Math.random()*picks.length)].steps;
+  history.push({board: clone(board), turn, chain});
+  let i = 0;
+  const step = () => {
+    apply(board, steps[i]); sel = [steps[i].tr, steps[i].tc]; i++;
+    if (i < steps.length) { render(); setTimeout(step, 300); }
+    else { sel = null; turn = 'r'; render(); }
+  };
+  step();
+}
+
+// ---------- UI ----------
+function click(r, c) {
+  if (over || ($('mode').value === 'ai' && turn === 'b')) return;
+  const moves = legalNow();
+  if (sel) {
+    const m = moves.find(m => m.fr===sel[0] && m.fc===sel[1] && m.tr===r && m.tc===c);
+    if (m) return doMove(m);
+  }
+  if (!chain && board[r][c]?.c === turn && moves.some(m => m.fr===r && m.fc===c)) { sel = [r,c]; render(); }
+}
+
+function render() {
+  const moves = legalNow();
+  const el = $('board'); el.innerHTML = '';
+  const movable = new Set(moves.map(m => m.fr*8+m.fc));
+  const targets = new Set(sel ? moves.filter(m => m.fr===sel[0] && m.fc===sel[1]).map(m => m.tr*8+m.tc) : []);
+  const aiBusy = $('mode').value === 'ai' && turn === 'b';
+  for (let r=0;r<8;r++) for (let c=0;c<8;c++) {
+    const sq = document.createElement('div');
+    sq.className = 'sq ' + ((r+c)%2 ? 'd' : 'l') + (targets.has(r*8+c) ? ' target' : '');
+    const p = board[r][c];
+    if (p) {
+      const pc = document.createElement('div');
+      pc.className = 'pc ' + p.c + (sel && sel[0]===r && sel[1]===c ? ' sel' : '') +
+        (!sel && !aiBusy && movable.has(r*8+c) && moves[0]?.cap ? ' can' : '');
+      pc.textContent = p.k ? '♛' : '';
+      sq.appendChild(pc);
+    }
+    sq.onclick = () => click(r, c);
+    el.appendChild(sq);
+  }
+  const name = t => t === 'r' ? 'Red' : 'Black';
+  if (!moves.length) {
+    over = true;
+    const winner = name(turn === 'r' ? 'b' : 'r');
+    $('status').textContent = $('mode').value === 'ai' ? (winner === 'Red' ? 'You win! 🎉' : 'The computer wins.') : winner + ' wins!';
+  } else {
+    $('status').textContent = aiBusy ? 'Computer is thinking…' :
+      name(turn) + ' to move' + (chain ? ' (keep jumping!)' : moves[0].cap ? ' (capture required)' : '');
+  }
+}
+
+$('new').onclick = newGame;
+$('mode').onchange = newGame;
+$('undo').onclick = () => {
+  if (!history.length) return;
+  // In AI mode, undo back to the player's turn.
+  do { const h = history.pop(); board = h.board; turn = h.turn; chain = h.chain; }
+  while ($('mode').value === 'ai' && turn === 'b' && history.length);
+  sel = chain; over = false; render();
+};
+newGame();
+</script>
+</body>
+</html>
